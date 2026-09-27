@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Figure for sec:discussion: validation score vs evaluation budget (Sonar).
-
-    python3 plot_budget.py                    # writes report/fig-budget.png
-    python3 plot_budget.py -o other.png
-"""
+"""Figure for sec:discussion: validation score vs evaluation budget (Sonar)."""
 import argparse
 
 import matplotlib

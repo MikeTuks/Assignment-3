@@ -2,9 +2,6 @@
 """Figure for sec:size: best cooperative score minus gbest, vs network size.
 One point per problem and architecture (32). Dashed line at the largest
 gbest win (254 weights).
-
-    python3 plot_crossover.py                 # writes report/fig-crossover.png
-    python3 plot_crossover.py -o other.png
 """
 import argparse
 

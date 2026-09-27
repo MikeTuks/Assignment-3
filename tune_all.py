@@ -1,19 +1,7 @@
-"""Tuning stages and the main comparison. Each run appends a row to
-results/tune_all.csv, and interrupted stages resume where they stopped.
+"""Tuning stages and the main comparison; results go to results/tune_all.csv.
 
-  python3 tune_all.py --stage budget     evaluation budget
-  python3 tune_all.py --stage hidden     hidden units per problem
-  python3 tune_all.py --stage shared     s, vmax, init_spread (gbest)
-  python3 tune_all.py --stage swarm      s for every algorithm (reported only)
-  python3 tune_all.py --stage kfixed     k for random grouping
-  python3 tune_all.py --stage coop       s x nr for MCPSO and DCPSO
-  python3 tune_all.py --stage lambda     weight decay
-  python3 tune_all.py --stage main       final comparison, scored on test
-  python3 tune_all.py --stage all        budget .. coop
-
-Shared parameters are tuned once on gbest and reused by all four algorithms,
-so differences come from the grouping, not the tuning. Tuning selects on a
-validation split; the test split is only used by stage main.
+Shared parameters are tuned once on gbest and reused by all four algorithms.
+Tuning selects on a validation split; only stage main uses the test split.
 """
 
 import argparse
@@ -26,11 +14,11 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
-import collections  # noqa: E402
 import functools  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor, as_completed  # noqa: E402
+from itertools import product  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -85,13 +73,11 @@ def split_three(X, T, seed, train=0.6, val=0.2, kind="regression"):
         va.append(members[a:b])
         te.append(members[b:])
     # Shuffle so the splits aren't ordered by class.
-    out = [rng.permutation(np.concatenate(p)) for p in (tr, va, te)]
-    return out[0], out[1], out[2]
+    return [rng.permutation(np.concatenate(p)) for p in (tr, va, te)]
 
 
 def measures(w, X, T, n_in, n_hid, n_out, kind):
-    """Scores for one network. "primary" is macro-F1 for classification and
-    -RMSE for regression, so larger is always better."""
+    """Scores for one network."""
     Y = forward(w, X, n_in, n_hid, n_out)
 
     if kind == "classification":
@@ -106,7 +92,6 @@ def measures(w, X, T, n_in, n_hid, n_out, kind):
             f1s.append(2 * prec * rec / (prec + rec) if prec + rec else 0.0)
             recalls.append(rec)
         return {
-            "primary": float(np.mean(f1s)),      # macro-F1 drives selection
             "accuracy": float((pred == true).mean()),
             "macro_f1": float(np.mean(f1s)),
             "min_recall": float(np.min(recalls)),
@@ -115,7 +100,6 @@ def measures(w, X, T, n_in, n_hid, n_out, kind):
     rmse = float(np.sqrt(np.mean((Y - T) ** 2)))
     var = float(np.var(T))
     return {
-        "primary": -rmse,                        # negative, so larger is better
         "rmse": rmse,
         "r2": float(1.0 - np.mean((Y - T) ** 2) / var) if var > 0 else 0.0,
         "min_recall": float("nan"),
@@ -153,12 +137,13 @@ def run_one(cfg):
         "init_spread": cfg["init_spread"], "omega": cfg["omega"],
         "lambda": cfg["lambda"], "budget": cfg["budget"],
         "budget_mode": cfg["budget_mode"],
-        "selected_nh": cfg.get("selected_nh", ""),
+        "selected_nh": cfg["selected_nh"],
         "iterations": iters, "restructures": restr,
         "expected_restructures": expected,
         "degenerate": bool(cfg["mode"] in (2, 3) and restr < expected),
-        # Selection uses val_score only.
-        "val_score": vm["primary"], "test_score": tm["primary"],
+        # Selection uses val_score only. Macro-F1 or -RMSE, so larger is better.
+        "val_score": vm["macro_f1"] if kind == "classification" else -vm["rmse"],
+        "test_score": tm["macro_f1"] if kind == "classification" else -tm["rmse"],
         "val_accuracy": vm.get("accuracy", ""),
         "test_accuracy": tm.get("accuracy", ""),
         "test_macro_f1": tm.get("macro_f1", ""),
@@ -197,51 +182,32 @@ def stage_budget(seeds):
     digits."""
     out = []
     for problem in ALL_PROBLEMS:
-        n = n_weights(problem, TUNE_NH[problem])
-        budgets = {int(p * one_pass_evals(n, 10, 2)): f"{p}x" for p in (1, 2, 4, 8, 16)}
-        for b in (10000, 200000):
-            budgets.setdefault(b, "fixed")
-        for budget in sorted(budgets):
-            for mode in (0, 1, 2, 3):
-                for seed in range(seeds):
-                    c = base(problem, mode, seed, "budget")
-                    c.update(budget=budget)
-                    out.append(c)
+        one = one_pass_evals(n_weights(problem, TUNE_NH[problem]), 10, 2)
+        budgets = {int(p * one) for p in (1, 2, 4, 8, 16)} | {10000, 200000}
+        out += [{**base(problem, mode, seed, "budget"), "budget": b}
+                for b, mode, seed in product(sorted(budgets), range(4), range(seeds))]
     return out
 
 
 def stage_shared(seeds):
     """s x vmax x init_spread on gbest, all at the s=10 budget so larger
     swarms don't get more evaluations."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        for s in (5, 10, 20, 30):
-            for vmax in (0.5, 1.0, 2.0):
-                for spread in (0.1, 0.5, 1.0):
-                    for seed in range(seeds):
-                        c = base(problem, 0, seed, "shared")
-                        c.update(s=s, vmax=vmax, init_spread=spread)
-                        out.append(c)
-    return out
+    return [{**base(p, 0, seed, "shared"), "s": s, "vmax": v, "init_spread": sp}
+            for p, s, v, sp, seed in product(ALL_PROBLEMS, (5, 10, 20, 30),
+                                             (0.5, 1.0, 2.0), (0.1, 0.5, 1.0),
+                                             range(seeds))]
 
 
 def stage_hidden(seeds):
     """Hidden units per problem, for all four algorithms, under two budgets:
     scaled (per-size budget, same effort per weight) and fixed (the nh=20
     budget for every size)."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        fixed = derived_budget(problem, 20)     # nh=20 budget, used for all sizes
-        for n_hid in HIDDEN_UNITS:
-            scaled = derived_budget(problem, n_hid)
-            for mode in (0, 1, 2, 3):
-                for seed in range(seeds):
-                    for label, budget in (("scaled", scaled), ("fixed", fixed)):
-                        c = base(problem, mode, seed, "hidden")
-                        c.update(n_hidden=n_hid, budget=budget,
-                                 budget_mode=label)
-                        out.append(c)
-    return out
+    return [{**base(p, mode, seed, "hidden"), "n_hidden": nh,
+             "budget": derived_budget(p, nh if label == "scaled" else 20),
+             "budget_mode": label}
+            for p, nh, mode, seed, label in product(ALL_PROBLEMS, HIDDEN_UNITS,
+                                                    range(4), range(seeds),
+                                                    ("scaled", "fixed"))]
 
 
 # Picked by the tuning stages (best validation score).
@@ -258,20 +224,11 @@ SETTLED_NH = {           # stage hidden, fixed-budget reading
 def stage_main(seeds):
     """Final comparison: 30 seeds, all four sizes, tuned parameters, scored
     on test."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        for n_hid in HIDDEN_UNITS:
-            for mode in (0, 1, 2, 3):
-                for seed in range(seeds):
-                    c = base(problem, mode, seed, "main")
-                    c.update(
-                        n_hidden=n_hid,
-                        budget=derived_budget(problem, n_hid),
-                        k_fixed=SETTLED_K[problem],
-                        selected_nh=SETTLED_NH[problem],
-                    )
-                    out.append(c)
-    return out
+    return [{**base(p, mode, seed, "main"), "n_hidden": nh,
+             "budget": derived_budget(p, nh), "k_fixed": SETTLED_K[p],
+             "selected_nh": SETTLED_NH[p]}
+            for p, nh, mode, seed in product(ALL_PROBLEMS, HIDDEN_UNITS,
+                                             range(4), range(seeds))]
 
 
 def stage_lambda(seeds):
@@ -280,56 +237,35 @@ def stage_lambda(seeds):
     The penalty is plain lambda * sum(w^2), not dennis2020's normalised form,
     so it grows with the number of weights.
     """
-    out = []
-    for problem, n_hid in (("iris", 20), ("digits", 32)):
-        for lam in (1e-4, 1e-3, 1e-2, 1e-1):
-            for seed in range(seeds):
-                c = base(problem, 0, seed, "lambda")
-                c.update(n_hidden=n_hid, budget=derived_budget(problem, n_hid))
-                c["lambda"] = lam
-                out.append(c)
-    return out
+    return [{**base(p, 0, seed, "lambda"), "n_hidden": nh,
+             "budget": derived_budget(p, nh), "lambda": lam}
+            for (p, nh), lam, seed in product((("iris", 20), ("digits", 32)),
+                                              (1e-4, 1e-3, 1e-2, 1e-1),
+                                              range(seeds))]
 
 
 def stage_swarm(seeds):
     """s for all four algorithms. Reported only; stage_main keeps the gbest
     value."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        for mode in (0, 1, 2, 3):
-            for s in (5, 10, 20, 30):
-                for seed in range(seeds):
-                    c = base(problem, mode, seed, "swarm")
-                    c.update(s=s)
-                    out.append(c)
-    return out
+    return [{**base(p, mode, seed, "swarm"), "s": s}
+            for p, mode, s, seed in product(ALL_PROBLEMS, range(4),
+                                            (5, 10, 20, 30), range(seeds))]
 
 
 def stage_kfixed(seeds):
     """Number of sub-swarms k for random grouping. Run before stage_main."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        for k in (2, 5, 10, 20, 40):
-            for seed in range(seeds):
-                c = base(problem, 1, seed, "kfixed")
-                c.update(k_fixed=k)
-                out.append(c)
-    return out
+    return [{**base(p, 1, seed, "kfixed"), "k_fixed": k}
+            for p, k, seed in product(ALL_PROBLEMS, (2, 5, 10, 20, 40),
+                                      range(seeds))]
 
 
 def stage_coop(seeds):
     """nr x s for MCPSO and DCPSO at the s=10, nr=2 budget. Large s with
     small nr may degenerate; see the `degenerate` column."""
-    out = []
-    for problem in ALL_PROBLEMS:
-        for mode in (2, 3):
-            for nr in (2, 4, 8, 16):
-                for s in (5, 10, 20):
-                    for seed in range(seeds):
-                        c = base(problem, mode, seed, "coop")
-                        c.update(nr=nr, s=s)
-                        out.append(c)
-    return out
+    return [{**base(p, mode, seed, "coop"), "nr": nr, "s": s}
+            for p, mode, nr, s, seed in product(ALL_PROBLEMS, (2, 3),
+                                                (2, 4, 8, 16), (5, 10, 20),
+                                                range(seeds))]
 
 
 STAGES = {"budget": stage_budget, "hidden": stage_hidden,
@@ -386,7 +322,6 @@ def main():
     print(f"stages {stages}: {len(tasks)} runs, {len(tasks) - len(todo)} done, "
           f"{len(todo)} to run on {args.workers} workers", flush=True)
     if not todo:
-        summarise(out)
         return
 
     t0 = time.time()
@@ -406,36 +341,6 @@ def main():
                           f"eta {(len(todo)-i)*el/i/60:.1f} min", flush=True)
 
     print(f"\nwrote {out} in {(time.time()-t0)/60:.1f} min")
-    summarise(out)
-
-
-def summarise(path):
-    """Mean val_score per parameter value, averaged over the others."""
-    rows = list(csv.DictReader(open(path)))
-    if not rows:
-        return
-    axes = {"budget": ("budget",), "lambda": ("lambda",),
-            "shared": ("s", "vmax", "init_spread"),
-            "hidden": ("n_hidden",), "swarm": ("s",),
-            "main": ("n_hidden",),
-            "kfixed": ("k_fixed",), "coop": ("nr", "s")}
-    for stage, params in axes.items():
-        rs = [r for r in rows if r["stage"] == stage]
-        if not rs:
-            continue
-        print(f"\n=== {stage} ({len(rs)} runs) ===")
-        for alg in sorted({r["algorithm"] for r in rs}):
-            for param in params:
-                g = collections.defaultdict(list)
-                for r in rs:
-                    if r["algorithm"] == alg:
-                        g[r[param]].append(float(r["val_score"]))
-                if len(g) < 2:
-                    continue
-                print(f"  {alg:<10} {param}:", end="")
-                for v in sorted(g, key=float):
-                    print(f"  {v}={np.mean(g[v]):.4f}", end="")
-                print()
 
 
 if __name__ == "__main__":

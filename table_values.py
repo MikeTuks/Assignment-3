@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 """Prints the values for each table in the report (plain text, no LaTeX).
-
-    python3 table_values.py                   # every table
-    python3 table_values.py tab:class         # one, or several
-    python3 table_values.py --csv-out         # comma-separated, for pasting
-    python3 table_values.py --list            # what is available
-
 Rounding: scores 4 dp, recall 3 dp, iterations whole numbers.
 """
 import argparse

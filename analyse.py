@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Recomputes the statistics quoted in the report from results/tune_all.csv.
 
-    python3 analyse.py
-
 Algorithm labels in the CSV are lowercase; use ALGOS, not 'DCPSO' etc.
 """
 import argparse

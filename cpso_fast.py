@@ -8,8 +8,6 @@
 All minimise f(x) + lambda*WD and stop after a fixed number of evaluations.
 Sub-swarm j owns dims[bounds[j]:bounds[j+1]] (CSR-style, since Numba can't
 hold ragged lists). State is stored as (s, n) arrays.
-
-    python3 cpso_fast.py      # merge/split self-check
 """
 
 import numpy as np
